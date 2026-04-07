@@ -112,6 +112,18 @@ class CWR_Database {
             KEY is_read (is_read)
         ) $charset;" );
 
+        // Report comments table
+        dbDelta( "CREATE TABLE {$wpdb->prefix}cwr_report_comments (
+            id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            report_id   BIGINT UNSIGNED NOT NULL,
+            user_id     BIGINT UNSIGNED NOT NULL,
+            comment     TEXT            NOT NULL,
+            created_at  DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (id),
+            KEY report_id (report_id),
+            KEY user_id (user_id)
+        ) $charset;" );
+
         update_option( 'cwr_db_version', CWR_DB_VERSION );
 
         // Seed roles and churches

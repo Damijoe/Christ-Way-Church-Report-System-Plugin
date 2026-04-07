@@ -21,7 +21,7 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 class CWR_Updater {
 
     // ── CONFIGURE THIS ──────────────────────────────────────────────────────
-    const GITHUB_REPO = 'YOUR-USERNAME/christway-reports';
+    const GITHUB_REPO = 'Damijoe/Christ-Way-Church-Report-System-Plugin';
     // e.g. 'johndoe/christway-reports'
     // ────────────────────────────────────────────────────────────────────────
 

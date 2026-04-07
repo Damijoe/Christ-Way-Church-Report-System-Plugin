@@ -48,7 +48,12 @@ class CWR_API {
 
         // Notifications
         register_rest_route( $ns, '/notifications',   [ 'methods' => 'GET',  'callback' => [ __CLASS__, 'get_notifications' ],   'permission_callback' => [ __CLASS__, 'is_logged_in' ] ] );
-        register_rest_route( $ns, '/notifications/read', [ 'methods' => 'POST', 'callback' => [ __CLASS__, 'mark_notifications_read' ], 'permission_callback' => [ __CLASS__, 'is_logged_in' ] ] );
+        register_rest_route( $ns, '/notifications/read', [ 'methods' => 'POST,GET', 'callback' => [ __CLASS__, 'mark_notifications_read' ], 'permission_callback' => [ __CLASS__, 'is_logged_in' ] ] );
+
+        // Report comments
+        register_rest_route( $ns, '/reports/(?P<id>\d+)/comments',  [ 'methods' => 'GET',  'callback' => [ __CLASS__, 'get_comments' ],    'permission_callback' => [ __CLASS__, 'is_logged_in' ] ] );
+        register_rest_route( $ns, '/reports/(?P<id>\d+)/comments',  [ 'methods' => 'POST', 'callback' => [ __CLASS__, 'add_comment' ],     'permission_callback' => [ __CLASS__, 'is_logged_in' ] ] );
+        register_rest_route( $ns, '/comments/(?P<id>\d+)',          [ 'methods' => 'DELETE', 'callback' => [ __CLASS__, 'delete_comment' ], 'permission_callback' => [ __CLASS__, 'is_admin' ] ] );
 
         // Exports
         register_rest_route( $ns, '/export/excel',    [ 'methods' => 'GET',  'callback' => [ __CLASS__, 'export_excel' ],        'permission_callback' => [ __CLASS__, 'can_export' ] ] );
@@ -509,4 +514,85 @@ class CWR_API {
         $church_id= absint( $req->get_param( 'church_id' ) );
         CWR_Export::export_pdf( $week, $zone_id, $church_id );
     }
+
+    public static function get_comments( $req ) {
+        global $wpdb;
+        $report_id = absint( $req->get_param( 'id' ) );
+        $c  = $wpdb->prefix . 'cwr_report_comments';
+        $u  = $wpdb->users;
+        return rest_ensure_response( $wpdb->get_results( $wpdb->prepare(
+            "SELECT c.*, u.display_name as author_name, um.meta_value as author_role
+             FROM $c c
+             LEFT JOIN $u u ON u.ID = c.user_id
+             LEFT JOIN {$wpdb->usermeta} um ON um.user_id = c.user_id
+                AND um.meta_key = '{$wpdb->prefix}capabilities'
+             WHERE c.report_id = %d
+             ORDER BY c.created_at ASC", $report_id
+        ) ) );
+    }
+
+    public static function add_comment( $req ) {
+        global $wpdb;
+        $report_id = absint( $req->get_param( 'id' ) );
+        $comment   = sanitize_textarea_field( $req->get_param( 'comment' ) );
+        $user_id   = get_current_user_id();
+        $role      = cwr_get_user_role( $user_id );
+
+        if ( ! $comment ) {
+            return new WP_Error( 'empty', 'Comment cannot be empty.', array( 'status' => 400 ) );
+        }
+
+        // Only admin and area pastors can comment on reports
+        if ( $role === 'pastor' ) {
+            return new WP_Error( 'forbidden', 'Pastors cannot add comments to reports.', array( 'status' => 403 ) );
+        }
+
+        $wpdb->insert( $wpdb->prefix . 'cwr_report_comments', array(
+            'report_id'  => $report_id,
+            'user_id'    => $user_id,
+            'comment'    => $comment,
+            'created_at' => current_time( 'mysql' ),
+        ) );
+
+        $comment_id = $wpdb->insert_id;
+
+        // Notify the pastor who submitted this report
+        $report = $wpdb->get_row( $wpdb->prepare(
+            "SELECT * FROM {$wpdb->prefix}cwr_reports WHERE id = %d", $report_id
+        ) );
+
+        if ( $report ) {
+            $church   = CWR_Database::get_church( $report->church_id );
+            $commenter = get_userdata( $user_id );
+            $commenter_name = $commenter ? $commenter->display_name : 'Admin';
+            $church_name    = $church ? $church->name : 'your church';
+
+            CWR_Notifications::add(
+                $report->pastor_id,
+                'New Comment on Your Report',
+                $commenter_name . ' commented on your report for ' . $church_name . ' (week of ' . $report->week_start . '): ' . wp_trim_words( $comment, 12 ),
+                'info'
+            );
+
+            // Email notification
+            $pastor = get_userdata( $report->pastor_id );
+            if ( $pastor ) {
+                CWR_Notifications::send_email(
+                    $pastor->user_email,
+                    'New Comment on Your Report - Christ Way Church',
+                    'Dear ' . $pastor->display_name . ', ' . $commenter_name . ' commented on your report for ' . $church_name . '. Comment: ' . $comment . '. Log in: ' . site_url()
+                );
+            }
+        }
+
+        return rest_ensure_response( array( 'id' => $comment_id, 'message' => 'Comment added.' ) );
+    }
+
+    public static function delete_comment( $req ) {
+        global $wpdb;
+        $id = absint( $req->get_param( 'id' ) );
+        $wpdb->delete( $wpdb->prefix . 'cwr_report_comments', array( 'id' => $id ) );
+        return rest_ensure_response( array( 'message' => 'Comment deleted.' ) );
+    }
+
 }

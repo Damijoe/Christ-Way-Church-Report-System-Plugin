@@ -157,25 +157,46 @@ class CWR_Auth {
             return new WP_Error( 'invalid', 'Registration not found or already processed.' );
         }
 
-        // Create WP user
-        $username = sanitize_user( strtolower( $reg->first_name . '.' . $reg->last_name ) . rand( 10, 99 ) );
-        $user_id  = wp_insert_user( [
+        // Create WP user - ensure unique username
+        $base_username = sanitize_user( strtolower( $reg->first_name . '.' . $reg->last_name ) );
+        $username      = $base_username;
+        $counter       = 1;
+        while ( username_exists( $username ) ) {
+            $username = $base_username . $counter;
+            $counter++;
+        }
+
+        // Use a temporary password then update with their real hash
+        $temp_pass = wp_generate_password( 24 );
+        $user_id   = wp_insert_user( array(
             'user_login'   => $username,
             'user_email'   => $reg->email,
             'display_name' => $reg->first_name . ' ' . $reg->last_name,
             'first_name'   => $reg->first_name,
             'last_name'    => $reg->last_name,
-            'user_pass'    => wp_generate_password( 20 ),
+            'user_pass'    => $temp_pass,
             'role'         => 'cwr_pastor',
-        ] );
+        ) );
 
-        if ( is_wp_error( $user_id ) ) return $user_id;
+        if ( is_wp_error( $user_id ) ) {
+            // If email already exists, try to find and reuse that user
+            $existing_user = get_user_by( 'email', $reg->email );
+            if ( $existing_user ) {
+                $user_id = $existing_user->ID;
+                CWR_Roles::assign_role( $user_id, 'cwr_pastor' );
+            } else {
+                return $user_id;
+            }
+        }
 
-        // Store real password hash (we keep theirs)
+        // Update password to the one the pastor registered with
+        wp_set_password( $temp_pass, $user_id ); // reset first
         $wpdb->query( $wpdb->prepare(
             "UPDATE {$wpdb->users} SET user_pass = %s WHERE ID = %d",
             $reg->password_hash, $user_id
         ) );
+        // Clear auth cookies cache
+        clean_user_cache( $user_id );
 
         // Assign church
         $wpdb->insert( $wpdb->prefix . 'cwr_pastor_churches', [

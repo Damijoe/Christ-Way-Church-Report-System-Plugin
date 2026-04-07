@@ -2,208 +2,185 @@
 /**
  * ChristWay GitHub Update Checker
  *
- * Hooks into WordPress's native update system to check for new releases
- * on GitHub. When a new release is published on GitHub, WordPress will
- * show an "Update available" notice in the Plugins page — just like any
- * other plugin.
- *
  * HOW TO USE:
- * 1. Push this plugin to a GitHub repository
- * 2. Set GITHUB_REPO below to your "username/repository-name"
- * 3. When you have a new version, bump CWR_VERSION in christway-reports.php
- * 4. Create a new GitHub Release tagged as e.g. "v1.0.1"
- *    and attach the plugin zip as a release asset
- * 5. WordPress will detect the update automatically
+ * 1. This file already points to: Damijoe/Christ-Way-Church-Report-System-Plugin
+ * 2. When you have a new version:
+ *    a) Bump CWR_VERSION in christway-reports.php (e.g. 1.0.1 → 1.0.2)
+ *    b) Push all files to GitHub
+ *    c) Create a GitHub Release tagged v1.0.2
+ *    d) Attach the christway-reports.zip as a release asset
+ *    e) In WP Admin → CW Reports → Update Settings → Force Check Now
+ *    f) Go to Plugins → click Update
  */
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 class CWR_Updater {
 
-    // ── CONFIGURE THIS ──────────────────────────────────────────────────────
-    const GITHUB_REPO = 'Damijoe/Christ-Way-Church-Report-System-Plugin';
-    // e.g. 'johndoe/christway-reports'
-    // ────────────────────────────────────────────────────────────────────────
-
-    const PLUGIN_SLUG = 'christway-reports/christway-reports.php';
-    const CACHE_KEY   = 'cwr_github_update_data';
-    const CACHE_TTL   = 43200; // 12 hours in seconds
+    const GITHUB_REPO   = 'Damijoe/Christ-Way-Church-Report-System-Plugin';
+    const PLUGIN_SLUG   = 'christway-reports/christway-reports.php';
+    const PLUGIN_FOLDER = 'christway-reports';
+    const CACHE_KEY     = 'cwr_github_release_data';
+    const CACHE_TTL     = 43200; // 12 hours
 
     public static function init() {
         add_filter( 'pre_set_site_transient_update_plugins', array( __CLASS__, 'check_for_update' ) );
         add_filter( 'plugins_api',                           array( __CLASS__, 'plugin_info' ), 10, 3 );
         add_filter( 'upgrader_post_install',                 array( __CLASS__, 'after_install' ), 10, 3 );
-        add_action( 'admin_notices',                         array( __CLASS__, 'maybe_show_config_notice' ) );
     }
 
-    /**
-     * Fetch latest release data from GitHub API
-     * Caches for 12 hours to avoid hitting GitHub rate limits
-     */
+    // ─── Fetch latest release from GitHub ────────────────────────────────────
+
     private static function get_github_release() {
         $cached = get_transient( self::CACHE_KEY );
         if ( false !== $cached ) return $cached;
 
-        $repo = self::GITHUB_REPO;
-
-        // Skip if not configured yet
-        if ( $repo === 'YOUR-USERNAME/christway-reports' ) return false;
-
-        $url      = "https://api.github.com/repos/{$repo}/releases/latest";
-        $response = wp_remote_get( $url, array(
-            'headers' => array(
-                'User-Agent' => 'WordPress/' . get_bloginfo('version') . '; ' . home_url(),
-                'Accept'     => 'application/vnd.github.v3+json',
-            ),
-            'timeout' => 10,
-        ) );
+        $response = wp_remote_get(
+            'https://api.github.com/repos/' . self::GITHUB_REPO . '/releases/latest',
+            array(
+                'timeout' => 15,
+                'headers' => array(
+                    'Accept'     => 'application/vnd.github.v3+json',
+                    'User-Agent' => 'WordPress/' . get_bloginfo( 'version' ),
+                ),
+            )
+        );
 
         if ( is_wp_error( $response ) ) return false;
-        if ( 200 !== wp_remote_retrieve_response_code( $response ) ) return false;
+        if ( wp_remote_retrieve_response_code( $response ) !== 200 ) return false;
 
         $body = json_decode( wp_remote_retrieve_body( $response ), true );
         if ( empty( $body['tag_name'] ) ) return false;
 
-        // Find the zip asset
+        // Find attached zip asset first
         $zip_url = '';
         if ( ! empty( $body['assets'] ) ) {
             foreach ( $body['assets'] as $asset ) {
-                if ( isset( $asset['content_type'] ) &&
-                     strpos( $asset['content_type'], 'zip' ) !== false ) {
+                if ( isset( $asset['name'] ) && substr( $asset['name'], -4 ) === '.zip' ) {
                     $zip_url = $asset['browser_download_url'];
                     break;
                 }
             }
         }
-
-        // Fallback: use the auto-generated source zip
+        // Fallback: use GitHub auto-generated source zip
+        // NOTE: This zip will have wrong folder name (repo-name-v1.0.1/)
+        // Always attach christway-reports.zip as a release asset to avoid this
         if ( ! $zip_url ) {
-            $zip_url = "https://github.com/{$repo}/archive/refs/tags/{$body['tag_name']}.zip";
+            $zip_url = 'https://github.com/' . self::GITHUB_REPO . '/releases/download/' . $body['tag_name'] . '/christway-reports.zip';
         }
 
         $data = array(
-            'version'      => ltrim( $body['tag_name'], 'v' ), // strip leading 'v' from e.g. "v1.0.1"
+            'version'      => ltrim( $body['tag_name'], 'v' ),
             'zip_url'      => $zip_url,
-            'description'  => $body['body'] ?? '',
-            'release_date' => isset( $body['published_at'] ) ? date( 'Y-m-d', strtotime( $body['published_at'] ) ) : '',
-            'tag'          => $body['tag_name'],
+            'description'  => ! empty( $body['body'] ) ? $body['body'] : '',
+            'release_date' => ! empty( $body['published_at'] ) ? date( 'Y-m-d', strtotime( $body['published_at'] ) ) : '',
         );
 
         set_transient( self::CACHE_KEY, $data, self::CACHE_TTL );
         return $data;
     }
 
-    /**
-     * WordPress calls this to check if updates are available.
-     * We inject our GitHub release data into the transient.
-     */
+    // ─── Tell WordPress an update is available ────────────────────────────────
+
     public static function check_for_update( $transient ) {
         if ( empty( $transient->checked ) ) return $transient;
 
         $release = self::get_github_release();
         if ( ! $release ) return $transient;
 
-        $current_version = CWR_VERSION;
-
-        // Only flag as update if GitHub version is newer
-        if ( version_compare( $release['version'], $current_version, '>' ) ) {
+        if ( version_compare( $release['version'], CWR_VERSION, '>' ) ) {
             $transient->response[ self::PLUGIN_SLUG ] = (object) array(
-                'slug'        => 'christway-reports',
-                'plugin'      => self::PLUGIN_SLUG,
-                'new_version' => $release['version'],
-                'url'         => 'https://github.com/' . self::GITHUB_REPO,
-                'package'     => $release['zip_url'],
-                'tested'      => get_bloginfo('version'),
-                'requires'    => '5.8',
-                'requires_php'=> '7.4',
+                'slug'         => self::PLUGIN_FOLDER,
+                'plugin'       => self::PLUGIN_SLUG,
+                'new_version'  => $release['version'],
+                'url'          => 'https://github.com/' . self::GITHUB_REPO,
+                'package'      => $release['zip_url'],
+                'tested'       => get_bloginfo( 'version' ),
+                'requires'     => '5.8',
+                'requires_php' => '7.4',
             );
         }
 
         return $transient;
     }
 
-    /**
-     * Provides plugin info for the "View version details" modal
-     * when clicking the version link in the Plugins page.
-     */
+    // ─── Plugin info modal ────────────────────────────────────────────────────
+
     public static function plugin_info( $result, $action, $args ) {
         if ( $action !== 'plugin_information' ) return $result;
-        if ( ! isset( $args->slug ) || $args->slug !== 'christway-reports' ) return $result;
+        if ( empty( $args->slug ) || $args->slug !== self::PLUGIN_FOLDER ) return $result;
 
         $release = self::get_github_release();
         if ( ! $release ) return $result;
 
-        $repo = self::GITHUB_REPO;
-
         return (object) array(
             'name'          => 'ChristWay Church Reporting System',
-            'slug'          => 'christway-reports',
+            'slug'          => self::PLUGIN_FOLDER,
             'version'       => $release['version'],
-            'author'        => '<a href="https://damijoe.com">Damijoe Digitals</a>',
+            'author'        => 'Damijoe Digitals',
             'requires'      => '5.8',
-            'tested'        => get_bloginfo('version'),
+            'tested'        => get_bloginfo( 'version' ),
             'requires_php'  => '7.4',
             'last_updated'  => $release['release_date'],
-            'homepage'      => 'https://github.com/' . $repo,
             'download_link' => $release['zip_url'],
             'sections'      => array(
-                'description' => '<p>Weekly reporting system for Christ Way Church Treasure House. Manages churches, zones, pastors, attendance and financial reports.</p>',
-                'changelog'   => '<pre>' . esc_html( $release['description'] ) . '</pre>',
+                'description' => '<p>Weekly reporting system for Christ Way Church Treasure House.</p>',
+                'changelog'   => nl2br( esc_html( $release['description'] ) ),
             ),
         );
     }
 
-    /**
-     * After WordPress installs the update, make sure the plugin folder
-     * is named correctly (GitHub zips sometimes add a suffix like -main or -v1.0.1)
-     */
+    // ─── After WordPress installs the update ─────────────────────────────────
+    // This is the critical part. After WP downloads and unzips the package,
+    // it may end up in a wrong-named folder. We rename it to christway-reports/.
+
     public static function after_install( $response, $hook_extra, $result ) {
-        if ( ! isset( $hook_extra['plugin'] ) ||
-             $hook_extra['plugin'] !== self::PLUGIN_SLUG ) {
+        // Only run for our plugin
+        if ( empty( $hook_extra['plugin'] ) || $hook_extra['plugin'] !== self::PLUGIN_SLUG ) {
             return $response;
         }
 
         global $wp_filesystem;
-        $plugin_dir = WP_PLUGIN_DIR . '/christway-reports';
 
-        // If WordPress extracted to a differently-named folder, rename it
-        if ( isset( $result['destination'] ) &&
-             $result['destination'] !== $plugin_dir ) {
-            $wp_filesystem->move( $result['destination'], $plugin_dir );
-            $result['destination'] = $plugin_dir;
+        // Make sure WP_Filesystem is available
+        if ( ! $wp_filesystem ) {
+            require_once ABSPATH . 'wp-admin/includes/file.php';
+            WP_Filesystem();
         }
 
-        // Re-activate plugin after update
-        $active_plugins = get_option( 'active_plugins', array() );
-        if ( ! in_array( self::PLUGIN_SLUG, $active_plugins ) ) {
-            $active_plugins[] = self::PLUGIN_SLUG;
-            update_option( 'active_plugins', $active_plugins );
+        $proper_dir = WP_PLUGIN_DIR . '/' . self::PLUGIN_FOLDER;
+
+        // If the update was extracted to a different folder, rename it
+        if ( isset( $result['destination'] ) && realpath( $result['destination'] ) !== realpath( $proper_dir ) ) {
+            // Delete the old plugin folder first
+            if ( $wp_filesystem->is_dir( $proper_dir ) ) {
+                $wp_filesystem->delete( $proper_dir, true );
+            }
+            // Move extracted folder to the correct location
+            $wp_filesystem->move( $result['destination'], $proper_dir, true );
+            $result['destination']         = $proper_dir;
+            $result['remote_destination']  = $proper_dir;
         }
+
+        // Keep the plugin active
+        $active = get_option( 'active_plugins', array() );
+        if ( ! in_array( self::PLUGIN_SLUG, $active, true ) ) {
+            $active[] = self::PLUGIN_SLUG;
+            update_option( 'active_plugins', $active );
+        }
+
+        // Clear ALL update caches so WP re-reads the new version number
+        delete_transient( self::CACHE_KEY );
+        delete_site_transient( 'update_plugins' );
+        wp_clean_plugins_cache( true );
 
         return $result;
     }
 
-    /**
-     * Show a notice in WP Admin if the GitHub repo hasn't been configured yet
-     */
-    public static function maybe_show_config_notice() {
-        if ( self::GITHUB_REPO === 'YOUR-USERNAME/christway-reports' ) {
-            $screen = get_current_screen();
-            if ( $screen && in_array( $screen->id, array( 'plugins', 'dashboard' ) ) ) {
-                echo '<div class="notice notice-warning is-dismissible">
-                    <p><strong>ChristWay Reports:</strong> GitHub repository not configured.
-                    Open <code>wp-content/plugins/christway-reports/includes/class-updater.php</code>
-                    and set <code>GITHUB_REPO</code> to your GitHub username/repository to enable automatic updates.</p>
-                </div>';
-            }
-        }
-    }
+    // ─── Admin: Force check now ───────────────────────────────────────────────
 
-    /**
-     * Force-clear the update cache (useful after publishing a new release)
-     * Call via: CWR_Updater::clear_cache();
-     */
     public static function clear_cache() {
         delete_transient( self::CACHE_KEY );
+        delete_site_transient( 'update_plugins' );
     }
 }

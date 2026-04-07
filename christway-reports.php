@@ -10,7 +10,7 @@
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'CWR_VERSION',   '1.0.0' );
+define( 'CWR_VERSION',   '1.0.1' );
 define( 'CWR_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'CWR_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 define( 'CWR_DB_VERSION', '1.0' );

@@ -3,14 +3,14 @@
  * Plugin Name: ChristWay Church Reporting System
  * Plugin URI:  https://christwaychurch.org
  * Description: Weekly reporting system for Christ Way Church Treasure House — manages churches, zones, pastors, attendance and financial reports with Excel/PDF exports.
- * Version:     1.0.0
+ * Version:     1.0.2
  * Author:      Damijoe Digitals
  * Text Domain: christway-reports
  */
 
 if ( ! defined( 'ABSPATH' ) ) exit;
 
-define( 'CWR_VERSION',   '1.0.1' );
+define( 'CWR_VERSION',   '1.0.2' );
 define( 'CWR_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'CWR_PLUGIN_URL', plugin_dir_url( __FILE__ ) );
 define( 'CWR_DB_VERSION', '1.0' );
@@ -31,6 +31,10 @@ register_deactivation_hook( __FILE__, [ 'CWR_Roles',    'remove_roles' ] );
 
 add_action( 'plugins_loaded', 'cwr_init' );
 function cwr_init() {
+    // Run DB install/upgrade if version changed (handles auto-updates)
+    if ( get_option( 'cwr_db_version' ) !== CWR_DB_VERSION ) {
+        CWR_Database::install();
+    }
     CWR_Roles::init();
     CWR_API::init();
     CWR_Notifications::init();
@@ -42,7 +46,16 @@ function cwr_init() {
 add_action( 'wp_enqueue_scripts', 'cwr_enqueue_assets' );
 function cwr_enqueue_assets() {
     global $post;
-    if ( ! $post || ! has_shortcode( $post->post_content, 'christway_portal' ) ) return;
+    if ( ! $post ) return;
+
+    // Check shortcode in content OR page slug contains portal/report keywords
+    $has_shortcode = has_shortcode( $post->post_content, 'christway_portal' );
+    $is_portal_page = in_array( $post->post_name, array(
+        'church-portal', 'christway-portal', 'reporting-portal',
+        'portal', 'reports', 'church-reports', 'christway-reports'
+    ) );
+
+    if ( ! $has_shortcode && ! $is_portal_page ) return;
     wp_enqueue_style( 'cwr-style', CWR_PLUGIN_URL . 'assets/css/portal.css', [], CWR_VERSION );
     wp_enqueue_script( 'cwr-app', CWR_PLUGIN_URL . 'frontend/build/main.js', [], CWR_VERSION, true );
     wp_localize_script( 'cwr-app', 'CWR_CONFIG', [
